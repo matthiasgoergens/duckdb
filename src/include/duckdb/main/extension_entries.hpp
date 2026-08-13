@@ -1281,6 +1281,7 @@ static constexpr ExtensionEntry EXTENSION_SETTINGS[] = {
     {"enable_geoparquet_conversion", "parquet"},
     {"enable_global_s3_configuration", "httpfs"},
     {"enable_server_cert_verification", "httpfs"},
+    {"extra_http_headers", "httpfs"},
     {"force_download", "httpfs"},
     {"force_download_threshold", "httpfs"},
     {"geometry_always_xy", "spatial"},
@@ -1410,6 +1411,12 @@ static constexpr ExtensionEntry EXTENSION_TYPES[] = {
     {"json", "json"},
     {"inet", "inet"},
 }; // END_OF_EXTENSION_TYPES
+
+// Note: these are currently hardcoded in scripts/generate_extensions_function.py
+// TODO: automate by passing though to script via duckdb
+static constexpr ExtensionEntry EXTENSION_STORAGE_EXTENSIONS[] = {
+    {"arn", "aws"},
+}; // END_OF_EXTENSION_STORAGE_EXTENSIONS
 
 // Note: these are currently hardcoded in scripts/generate_extensions_function.py
 // TODO: automate by passing though to script via duckdb
