@@ -18,10 +18,14 @@ namespace duckdb {
 struct InterpolateOperator {
 	template <typename TARGET_TYPE>
 	static inline TARGET_TYPE Operation(const TARGET_TYPE &lo, const double d, const TARGET_TYPE &hi) {
-		const auto delta = static_cast<double>(hi - lo);
-		return LossyNumericCast<TARGET_TYPE>(lo + static_cast<TARGET_TYPE>(delta * d));
+		const auto delta = static_cast<double>(hi) - static_cast<double>(lo);
+		return LossyNumericCast<TARGET_TYPE>(static_cast<double>(lo) + delta * d);
 	}
 };
+
+// Computes trunc(delta * weight) exactly for a non-negative UHUGEINT delta and a finite,
+// non-negative double weight. Returns false when the truncated product exceeds UHUGEINT_MAX.
+bool TryMultiplyUhugeintByDoubleFraction(const uhugeint_t &delta, const double weight, uhugeint_t &result);
 
 template <>
 double InterpolateOperator::Operation(const double &lo, const double d, const double &hi);
