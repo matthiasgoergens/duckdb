@@ -1,4 +1,6 @@
 #include "duckdb/parser/peg/ast/column_constraint_entry.hpp"
+#include "duckdb/parser/expression/star_expression.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/peg/ast/column_constraints.hpp"
 #include "duckdb/parser/peg/ast/column_elements.hpp"
 #include "duckdb/parser/peg/ast/create_table_column_element.hpp"
@@ -38,6 +40,18 @@ PEGTransformerFactory::TransformCreateStatement(PEGTransformer &transformer, con
 		secret_info.persist_type = temporary ? *temporary : SecretPersistType::DEFAULT;
 	}
 	result->info->temporary = temporary && *temporary == SecretPersistType::TEMPORARY;
+	if (result->info->temporary) {
+		// the grammar allows TEMPORARY in front of every create variation - reject it where the entry does not
+		// carry a user-supplied flag, but derives one from the table it belongs to
+		switch (result->info->type) {
+		case CatalogType::INDEX_ENTRY:
+			throw ParserException("Temporary indexes are not supported");
+		case CatalogType::TRIGGER_ENTRY:
+			throw ParserException("Temporary triggers are not supported");
+		default:
+			break;
+		}
+	}
 	return std::move(result);
 }
 
@@ -96,7 +110,7 @@ PEGTransformerFactory::TransformCreateTableAs(PEGTransformer &transformer, optio
 	result.select_statement = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(statement));
 	if (with_data && *with_data) {
 		auto limit_modifier = make_uniq<LimitModifier>();
-		limit_modifier->limit = make_uniq<ConstantExpression>(0);
+		limit_modifier->limit = ConstantExpression::Integer(0);
 		result.select_statement->node->modifiers.push_back(std::move(limit_modifier));
 	}
 	return result;
@@ -196,11 +210,6 @@ Identifier PEGTransformerFactory::TransformStringLiteralIdentifier(PEGTransforme
 	return Identifier(string_literal);
 }
 
-string PEGTransformerFactory::TransformIdentifier(PEGTransformer &transformer, ParseResult &parse_result) {
-	auto &list_pr = parse_result.Cast<ListParseResult>();
-	return list_pr.Child<IdentifierParseResult>(0).identifier.GetIdentifierName();
-}
-
 vector<string> PEGTransformerFactory::TransformDottedIdentifier(PEGTransformer &transformer,
                                                                 const Identifier &identifier,
                                                                 const optional<vector<string>> &dot_col_label) {
@@ -282,14 +291,14 @@ ConstraintColumnDefinition PEGTransformerFactory::TransformColumnDefinition(
 	if (has_generated) {
 		auto generated = std::move(*generated_column);
 		if (generated.expr->HasSubquery()) {
-			throw ParserException("Expression of generated column \"%s\" contains a subquery, which isn't allowed",
+			throw ParserException("Expression of generated column %s contains a subquery, which isn't allowed",
 			                      qualified_name.Name());
 		}
 		if (column_type != LogicalType::ANY) {
 			generated.expr = make_uniq<CastExpression>(column_type, std::move(generated.expr));
 		}
 		if (generated.expr->HasSubquery()) {
-			throw ParserException("Expression of generated column \"%s\" contains a subquery, which isn't allowed",
+			throw ParserException("Expression of generated column %s contains a subquery, which isn't allowed",
 			                      qualified_name.Name());
 		}
 
@@ -392,7 +401,7 @@ ColumnConstraintEntry PEGTransformerFactory::TransformColumnCompression(PEGTrans
 ColumnConstraintEntry PEGTransformerFactory::TransformForeignKeyConstraint(PEGTransformer &transformer,
                                                                            unique_ptr<BaseTableRef> base_table_name,
                                                                            const optional<vector<string>> &column_list,
-                                                                           const KeyActions &key_actions) {
+                                                                           const optional<KeyActions> &key_actions) {
 	ForeignKeyInfo fk_info;
 	fk_info.schema = base_table_name->GetQualifiedName().Schema();
 	fk_info.table = base_table_name->Table();
@@ -408,17 +417,26 @@ ColumnConstraintEntry PEGTransformerFactory::TransformForeignKeyConstraint(PEGTr
 	return entry;
 }
 
-KeyActions PEGTransformerFactory::TransformKeyActions(PEGTransformer &transformer,
-                                                      const optional<string> &update_action,
-                                                      const optional<string> &delete_action) {
-	KeyActions results;
-	if (update_action) {
-		results.update_action = *update_action;
-	}
+KeyActions PEGTransformerFactory::TransformUpdateFirstKeyActions(PEGTransformer &transformer,
+                                                                 const string &update_action,
+                                                                 const optional<string> &delete_action) {
+	KeyActions result;
+	result.update_action = update_action;
 	if (delete_action) {
-		results.delete_action = *delete_action;
+		result.delete_action = *delete_action;
 	}
-	return results;
+	return result;
+}
+
+KeyActions PEGTransformerFactory::TransformDeleteFirstKeyActions(PEGTransformer &transformer,
+                                                                 const string &delete_action,
+                                                                 const optional<string> &update_action) {
+	KeyActions result;
+	result.delete_action = delete_action;
+	if (update_action) {
+		result.update_action = *update_action;
+	}
+	return result;
 }
 
 string PEGTransformerFactory::TransformUpdateAction(PEGTransformer &transformer, const string &key_action) {
@@ -482,7 +500,7 @@ ColumnConstraintEntry PEGTransformerFactory::TransformNotNullConstraint(PEGTrans
 ColumnConstraintEntry PEGTransformerFactory::TransformColumnCollation(PEGTransformer &transformer,
                                                                       const vector<string> &dotted_identifier) {
 	string collation = StringUtil::Join(dotted_identifier, ".");
-	auto expr = make_uniq<ConstantExpression>(Value(collation));
+	auto expr = ConstantExpression::String(collation);
 	expr->SetAlias("collation");
 	ColumnConstraintEntry entry;
 	entry.constraint_name = "ColumnCollation";

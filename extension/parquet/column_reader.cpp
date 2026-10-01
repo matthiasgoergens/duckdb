@@ -305,8 +305,12 @@ bool ColumnReader::PageIsFilteredOut(PageHeader &page_hdr, optional_ptr<const Ta
 		auto stats =
 		    ParquetStatisticsUtils::TransformParquetStatistics(Type(), Schema(), *page_stats, /*can_have_nan=*/true);
 		auto &expr_filter = filter->Cast<ExpressionFilter>();
-		if (stats && expr_filter.CheckStatistics(*stats) == FilterPropagateResult::FILTER_ALWAYS_FALSE) {
-			page_is_filtered_out = true;
+		if (stats) {
+			auto prune_result = expr_filter.CheckStatistics(*stats);
+			if (prune_result == FilterPropagateResult::FILTER_ALWAYS_FALSE ||
+			    prune_result == FilterPropagateResult::FILTER_FALSE_OR_NULL) {
+				page_is_filtered_out = true;
+			}
 		}
 	}
 	if (page_is_filtered_out) {
@@ -503,6 +507,9 @@ void ColumnReader::PreparePage(PageHeader &page_hdr) {
 	uint32_t compressed_page_size = page_hdr.compressed_page_size;
 
 	if (chunk->__isset.crypto_metadata) {
+		if (!reader.metadata->crypto_metadata) {
+			throw InvalidInputException("File is encrypted but no file crypto metadata is set");
+		}
 		auto const file_aad = reader.GetUniqueFileIdentifier(reader.metadata->crypto_metadata->encryption_algorithm);
 		if (!file_aad.empty()) {
 			// If there is a file aad (identifier), this means that the Encrypted file is written by Arrow
@@ -1005,6 +1012,20 @@ static unique_ptr<ColumnReader> CreateDecimalReader(const ParquetReader &reader,
 	}
 }
 
+static_assert(ParquetTimestampLogicalType(ParquetExtraTypeInfo::UNIT_NS) != LogicalTypeId::TIMESTAMP);
+static_assert(ParquetTimestampTzLogicalType(ParquetExtraTypeInfo::UNIT_NS) != LogicalTypeId::TIMESTAMP_TZ);
+
+static_assert(ParquetTimestampLogicalType(ParquetExtraTypeInfo::IMPALA_TIMESTAMP) != LogicalTypeId::TIMESTAMP_NS);
+static_assert(ParquetTimestampTzLogicalType(ParquetExtraTypeInfo::IMPALA_TIMESTAMP) != LogicalTypeId::TIMESTAMP_TZ_NS);
+static_assert(ParquetTimestampLogicalType(ParquetExtraTypeInfo::UNIT_MS) != LogicalTypeId::TIMESTAMP_NS);
+static_assert(ParquetTimestampTzLogicalType(ParquetExtraTypeInfo::UNIT_MS) != LogicalTypeId::TIMESTAMP_TZ_NS);
+static_assert(ParquetTimestampLogicalType(ParquetExtraTypeInfo::UNIT_MICROS) != LogicalTypeId::TIMESTAMP_NS);
+static_assert(ParquetTimestampTzLogicalType(ParquetExtraTypeInfo::UNIT_MICROS) != LogicalTypeId::TIMESTAMP_TZ_NS);
+
+static_assert(ParquetTimeLogicalType(ParquetExtraTypeInfo::UNIT_NS) != LogicalTypeId::TIME);
+static_assert(ParquetTimeLogicalType(ParquetExtraTypeInfo::UNIT_MS) != LogicalTypeId::TIME_NS);
+static_assert(ParquetTimeLogicalType(ParquetExtraTypeInfo::UNIT_MICROS) != LogicalTypeId::TIME_NS);
+
 unique_ptr<ColumnReader> ColumnReader::CreateReader(const ParquetReader &reader, const ParquetColumnSchema &schema) {
 	switch (schema.type.id()) {
 	case LogicalTypeId::BOOLEAN:
@@ -1045,22 +1066,12 @@ unique_ptr<ColumnReader> ColumnReader::CreateReader(const ParquetReader &reader,
 		case ParquetExtraTypeInfo::UNIT_MICROS:
 			return make_uniq<CallbackColumnReader<int64_t, timestamp_t, ParquetTimestampMicrosToTimestamp>>(reader,
 			                                                                                                schema);
-		case ParquetExtraTypeInfo::UNIT_NS:
-			return make_uniq<CallbackColumnReader<int64_t, timestamp_t, ParquetTimestampNsToTimestamp>>(reader, schema);
 		default:
 			throw InternalException("TIMESTAMP requires type info");
 		}
 	case LogicalTypeId::TIMESTAMP_NS:
 	case LogicalTypeId::TIMESTAMP_TZ_NS:
 		switch (schema.type_info) {
-		case ParquetExtraTypeInfo::IMPALA_TIMESTAMP:
-			return make_uniq<CallbackColumnReader<Int96, timestamp_ns_t, ImpalaTimestampToTimestampNS>>(reader, schema);
-		case ParquetExtraTypeInfo::UNIT_MS:
-			return make_uniq<CallbackColumnReader<int64_t, timestamp_ns_t, ParquetTimestampMsToTimestampNs>>(reader,
-			                                                                                                 schema);
-		case ParquetExtraTypeInfo::UNIT_MICROS:
-			return make_uniq<CallbackColumnReader<int64_t, timestamp_ns_t, ParquetTimestampUsToTimestampNs>>(reader,
-			                                                                                                 schema);
 		case ParquetExtraTypeInfo::UNIT_NS:
 			return make_uniq<CallbackColumnReader<int64_t, timestamp_ns_t, ParquetTimestampNsToTimestampNs>>(reader,
 			                                                                                                 schema);
@@ -1075,17 +1086,11 @@ unique_ptr<ColumnReader> ColumnReader::CreateReader(const ParquetReader &reader,
 			return make_uniq<CallbackColumnReader<int32_t, dtime_t, ParquetMsIntToTime>>(reader, schema);
 		case ParquetExtraTypeInfo::UNIT_MICROS:
 			return make_uniq<CallbackColumnReader<int64_t, dtime_t, ParquetIntToTime>>(reader, schema);
-		case ParquetExtraTypeInfo::UNIT_NS:
-			return make_uniq<CallbackColumnReader<int64_t, dtime_t, ParquetNsIntToTime>>(reader, schema);
 		default:
 			throw InternalException("TIME requires type info");
 		}
 	case LogicalTypeId::TIME_NS:
 		switch (schema.type_info) {
-		case ParquetExtraTypeInfo::UNIT_MS:
-			return make_uniq<CallbackColumnReader<int32_t, dtime_ns_t, ParquetMsIntToTimeNs>>(reader, schema);
-		case ParquetExtraTypeInfo::UNIT_MICROS:
-			return make_uniq<CallbackColumnReader<int64_t, dtime_ns_t, ParquetUsIntToTimeNs>>(reader, schema);
 		case ParquetExtraTypeInfo::UNIT_NS:
 			return make_uniq<CallbackColumnReader<int64_t, dtime_ns_t, ParquetIntToTimeNs>>(reader, schema);
 		default:

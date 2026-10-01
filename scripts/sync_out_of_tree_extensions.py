@@ -94,7 +94,7 @@ def parse_cmake_file(cmake_path):
         # the next keyword or end-of-body
         submodules = []
         submodules_match = re.search(
-            r'\bSUBMODULES\s+((?:(?!(?:GIT_URL|GIT_TAG|DONT_LINK|DONT_BUILD|LOAD_TESTS|APPLY_PATCHES|INCLUDE_DIR|TEST_DIR|EXTENSION_VERSION|LINKED_LIBS|\))).)+)',
+            r'\bSUBMODULES\s+((?:(?!(?:GIT_URL|GIT_TAG|DONT_BUILD|LOAD_TESTS|APPLY_PATCHES|INCLUDE_DIR|TEST_DIR|EXTENSION_VERSION|LINKED_LIBS|\))).)+)',
             body,
         )
         if submodules_match:
@@ -122,14 +122,26 @@ class ExtensionNotCleanError(Exception):
 
 
 def resolve_ref(repo_dir, ref):
-    """Resolve a git ref to a full commit hash (returns None on failure)."""
-    result = run_cmd(['git', 'rev-parse', ref + '^{}'], cwd=repo_dir, check=False)
-    if result.returncode == 0:
-        return result.stdout.strip()
-    result = run_cmd(['git', 'rev-parse', ref], cwd=repo_dir, check=False)
+    """
+    Resolve a git ref to a full commit hash that exists locally (returns None on failure).
+
+    --verify with the ^{commit} peel is required: a plain 'git rev-parse <sha>' echoes back
+    any well-formed hash, even one whose object the local clone does not have.
+    """
+    result = run_cmd(['git', 'rev-parse', '--verify', '-q', ref + '^{commit}'], cwd=repo_dir, check=False)
     if result.returncode == 0:
         return result.stdout.strip()
     return None
+
+
+def resolve_ref_or_fetch(name, repo_dir, ref):
+    """Resolve <ref> locally, fetching from the remote if it is not known yet."""
+    resolved = resolve_ref(repo_dir, ref)
+    if resolved:
+        return resolved
+    print(f"  {name}: '{ref}' not found locally, fetching ...")
+    run_cmd(['git', 'fetch', '--all', '--tags'], cwd=repo_dir)
+    return resolve_ref(repo_dir, ref)
 
 
 def get_patch_files(patch_dir):
@@ -141,17 +153,19 @@ def get_patch_files(patch_dir):
 
 def apply_patches_as_commits(ext_dir, patch_dir, patches):
     """
-    Apply each patch file with git-apply and create a commit whose message is
-    the patch filename (e.g. "fix.patch").
+    Apply each patch file and create a commit whose message is the patch filename
+    (e.g. "fix.patch").
     """
     for patch_name in patches:
         patch_file = patch_dir / patch_name
-        # Apply to the working tree (not --index): a patch may touch files inside a checked-out
-        # submodule (e.g. database-connector/...), and "git apply --index" cannot stage paths that
-        # live in a submodule ("does not exist in index"). We stage everything explicitly afterwards.
-        # --whitespace=nowarn: never rewrite patch content; --whitespace=fix corrupts
-        # patches that themselves add patch files containing trailing whitespace.
-        run_cmd(['git', 'apply', '--whitespace=nowarn', str(patch_file)], cwd=ext_dir)
+        # Apply exactly as scripts/apply_extension_patches.py does for the FetchContent build, so a
+        # patch that builds there builds here too: `patch -p1 --forward` tolerates the context drift
+        # (fuzz) an extension bump can introduce, where `git apply` rejects a single changed context
+        # line.  It writes to the working tree, not the index, so a patch may touch files inside a
+        # checked-out submodule (e.g. database-connector/...); everything is staged explicitly below.
+        # --no-backup-if-mismatch: a fuzzy apply otherwise leaves <file>.orig behind, which the
+        # `git add -A` below would commit into the extension.
+        run_cmd(['patch', '-p1', '--forward', '--no-backup-if-mismatch', '-i', str(patch_file)], cwd=ext_dir)
         run_cmd(['git', 'add', '-A'], cwd=ext_dir)
         run_cmd(
             [
@@ -263,10 +277,7 @@ def check_extension_clean(name, ext_dir, git_tag, patches):
         )
 
     # Resolve git_tag; fetch from remote if it is not known locally yet
-    resolved = resolve_ref(ext_dir, git_tag)
-    if not resolved:
-        run_cmd(['git', 'fetch', '--all'], cwd=ext_dir)
-        resolved = resolve_ref(ext_dir, git_tag)
+    resolved = resolve_ref_or_fetch(name, ext_dir, git_tag)
     if not resolved:
         raise ExtensionNotCleanError(f"Extension '{name}': cannot resolve ref '{git_tag}'")
 
@@ -332,10 +343,7 @@ def sync_extension(ext, external_dir, repo_root):
         export = os.environ.get('EXPORT_EXTENSION_PATCHES') == '1'
 
         if export:
-            resolved = resolve_ref(ext_dir, git_tag)
-            if not resolved:
-                run_cmd(['git', 'fetch', '--all'], cwd=ext_dir)
-                resolved = resolve_ref(ext_dir, git_tag)
+            resolved = resolve_ref_or_fetch(name, ext_dir, git_tag)
             if not resolved:
                 raise ExtensionNotCleanError(f"Extension '{name}': cannot resolve ref '{git_tag}'")
             export_commits_as_patches(
@@ -344,8 +352,8 @@ def sync_extension(ext, external_dir, repo_root):
             return
         elif force:
             print(f"  {name}: force-resetting to {git_tag[:12]} and re-applying patches ...")
-            if not resolve_ref(ext_dir, git_tag):
-                run_cmd(['git', 'fetch', '--all'], cwd=ext_dir)
+            if not resolve_ref_or_fetch(name, ext_dir, git_tag):
+                raise ExtensionNotCleanError(f"Extension '{name}': cannot resolve ref '{git_tag}'")
             run_cmd(['git', 'reset', '--hard', git_tag], cwd=ext_dir)
             run_cmd(['git', 'clean', '-fd'], cwd=ext_dir)
         else:
@@ -415,7 +423,7 @@ def collect_extensions(repo_root, build_extensions_arg=None, extension_configs_a
     return extensions
 
 
-VCPKG_BUILTIN_BASELINE = '84bab45d415d22042bd0b9081aea57f362da3f35'
+VCPKG_BUILTIN_BASELINE = 'cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3'  # Release 2026.06.24
 VCPKG_REGISTRY_BASELINE = 'd485389ad737bb05a5e8afd1fbde5672b559f19e'
 VCPKG_REGISTRY_PACKAGES = ['avro-c', 'vcpkg-cmake']
 

@@ -7,6 +7,7 @@
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/operator/persistent/batch_memory_manager.hpp"
 #include "duckdb/execution/operator/persistent/batch_task_manager.hpp"
+#include "duckdb/execution/operator/persistent/copy_output_lifecycle.hpp"
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/parallel/base_pipeline_event.hpp"
 #include "duckdb/parallel/executor_task.hpp"
@@ -85,11 +86,13 @@ public:
 
 public:
 	explicit FixedBatchCopyGlobalState(ClientContext &context_p, idx_t minimum_memory_per_thread)
-	    : memory_manager(context_p, minimum_memory_per_thread), initialized(false), rows_copied(0),
-	      scheduled_batch_index(0), flushed_batch_index(0), any_flushing(false), any_finished(false),
+	    : output_lifecycle(context_p), memory_manager(context_p, minimum_memory_per_thread), initialized(false),
+	      rows_copied(0), scheduled_batch_index(0), flushed_batch_index(0), any_flushing(false), any_finished(false),
 	      minimum_memory_per_thread(minimum_memory_per_thread) {
 	}
 
+	//! Destroy after global_state so its handle closes before cleanup.
+	CopyOutputLifecycle output_lifecycle;
 	BatchMemoryManager memory_manager;
 	BatchTaskManager<BatchCopyTask> task_manager;
 	mutex lock;
@@ -126,6 +129,7 @@ public:
 			return;
 		}
 		// initialize writing to the file
+		output_lifecycle.RegisterFile(op.file_path);
 		global_state = op.function.copy_to_initialize_global(context, *op.bind_data, op.file_path);
 		if (op.function.initialize_operator) {
 			op.function.initialize_operator(*global_state, op);
@@ -334,14 +338,14 @@ SinkFinalizeType PhysicalBatchCopyToFile::FinalFlush(ClientContext &context, Glo
 	if (gstate.scheduled_batch_index != gstate.flushed_batch_index) {
 		throw InternalException("Not all batches were flushed to disk - incomplete file?");
 	}
+	gstate.memory_manager.FinalCheck();
 	if (function.copy_to_finalize && gstate.global_state) {
 		function.copy_to_finalize(context, *bind_data, *gstate.global_state);
-
 		if (use_tmp_file) {
 			PhysicalCopyToFile::MoveTmpFile(context, file_path);
 		}
 	}
-	gstate.memory_manager.FinalCheck();
+	gstate.output_lifecycle.MarkSuccessful();
 	return SinkFinalizeType::READY;
 }
 
@@ -668,6 +672,13 @@ SinkNextBatchType PhysicalBatchCopyToFile::NextBatch(ExecutionContext &context,
 	state.batch_index = lstate.partition_info.batch_index.GetIndex();
 
 	state.InitializeCollection(context.client, *this);
+	return SinkNextBatchType::READY;
+}
+
+SinkNextBatchType PhysicalBatchCopyToFile::UpdateMinBatchIndex(ExecutionContext &,
+                                                               OperatorSinkNextBatchInput &input) const {
+	auto &gstate = input.global_state.Cast<FixedBatchCopyGlobalState>();
+	gstate.memory_manager.UpdateMinBatchIndex(input.local_state.partition_info.min_batch_index.GetIndex());
 	return SinkNextBatchType::READY;
 }
 

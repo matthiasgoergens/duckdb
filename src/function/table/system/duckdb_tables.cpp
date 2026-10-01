@@ -22,7 +22,7 @@ struct DuckDBTablesData : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> DuckDBTablesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<string> &names) {
+                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names.emplace_back("database_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
@@ -175,7 +175,8 @@ void DuckDBTablesFunction(ClientContext &context, TableFunctionInput &data_p, Da
 }
 
 void DuckDBTablesFun::RegisterFunction(BuiltinFunctions &set) {
-	set.AddFunction(TableFunction("duckdb_tables", {}, DuckDBTablesFunction, DuckDBTablesBind, DuckDBTablesInit));
+	auto function = TableFunction("duckdb_tables", {}, DuckDBTablesFunction, DuckDBTablesBind, DuckDBTablesInit);
+	set.AddFunction(std::move(function));
 }
 
 } // namespace duckdb

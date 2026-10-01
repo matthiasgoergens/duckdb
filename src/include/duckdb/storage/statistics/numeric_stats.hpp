@@ -35,7 +35,7 @@ struct NumericStatsData {
 struct NumericStats {
 	//! Unknown statistics - i.e. "has_min" is false, "has_max" is false
 	DUCKDB_API static BaseStatistics CreateUnknown(LogicalType type);
-	//! Empty statistics - i.e. "min = MaxValue<type>, max = MinValue<type>"
+	//! Empty statistics - min and max are initialized to the domain's maximum and minimum
 	DUCKDB_API static BaseStatistics CreateEmpty(LogicalType type);
 
 	//! Returns true if the stats has a constant value
@@ -72,6 +72,9 @@ struct NumericStats {
 	//! Check whether or not a given comparison with a constant could possibly be satisfied by rows given the statistics
 	DUCKDB_API static FilterPropagateResult CheckZonemap(const BaseStatistics &stats, ExpressionType comparison_type,
 	                                                     array_ptr<const Value> constants);
+
+	//! Whether the constants cover every value in [min, max] - only meaningful for integral types
+	static bool ConstantsCoverRange(const BaseStatistics &stats, array_ptr<const Value> constants);
 
 	DUCKDB_API static void Merge(BaseStatistics &stats, const BaseStatistics &other_p);
 

@@ -250,6 +250,9 @@ private:
 			auto &get = op.Cast<LogicalGet>();
 			switch (TYPE) {
 			case ConversionType::TO_CANONICAL: {
+				// Source ordinality is represented by the bound operators.
+				source_ordinality = get.source_ordinality;
+				get.source_ordinality = OrdinalityType::WITHOUT_ORDINALITY;
 				D_ASSERT(column_ids.empty());
 				// Grab selected GET columns and populate with all possible columns
 				column_ids = std::move(get.GetMutableColumnIds());
@@ -270,13 +273,26 @@ private:
 					}
 				}
 
+				auto register_filter_index = [&](ProjectionIndex filter_index) {
+					D_ASSERT(filter_index.GetIndex() < column_ids.size());
+					const auto canonical_index = ProjectionIndex(column_ids[filter_index.GetIndex()].GetPrimaryIndex());
+					auto entry = restore_original_table_filter_index.emplace(canonical_index, filter_index);
+					return entry.second || entry.first->second == filter_index;
+				};
 				for (auto &entry : get.table_filters) {
-					D_ASSERT(entry.GetIndex().GetIndex() < column_ids.size());
-					const auto canonical_index =
-					    ProjectionIndex(column_ids[entry.GetIndex().GetIndex()].GetPrimaryIndex());
-					if (!restore_original_table_filter_index.emplace(canonical_index, entry.GetIndex()).second) {
+					if (!register_filter_index(entry.GetIndex())) {
 						restore_original_table_filter_index.clear();
 						return false;
+					}
+				}
+				for (const auto &filter : get.table_filters.GetMultiColumnFilters()) {
+					const auto &expression_filter =
+					    ExpressionFilter::GetExpressionFilter(*filter, "CommonSubplanOptimizer::ConvertTableIndex");
+					for (const auto &column_index : expression_filter.column_indexes) {
+						if (!register_filter_index(column_index)) {
+							restore_original_table_filter_index.clear();
+							return false;
+						}
 					}
 				}
 				if (!restore_original_table_filter_index.empty()) {
@@ -285,6 +301,15 @@ private:
 						const auto canonical_index =
 						    ProjectionIndex(column_ids[entry.GetIndex().GetIndex()].GetPrimaryIndex());
 						remapped_filters.PushFilter(canonical_index, entry.TakeFilter());
+					}
+					for (const auto &filter : get.table_filters.GetMultiColumnFilters()) {
+						auto remapped_filter =
+						    ExpressionFilter::GetExpressionFilter(*filter, "CommonSubplanOptimizer::ConvertTableIndex")
+						        .Copy();
+						for (auto &column_index : remapped_filter->column_indexes) {
+							column_index = ProjectionIndex(column_ids[column_index.GetIndex()].GetPrimaryIndex());
+						}
+						remapped_filters.PushMultiColumnFilter(std::move(remapped_filter));
 					}
 					get.table_filters = std::move(remapped_filters);
 				}
@@ -305,6 +330,7 @@ private:
 				break;
 			}
 			case ConversionType::RESTORE_ORIGINAL:
+				get.source_ordinality = source_ordinality;
 				D_ASSERT(!column_ids.empty());
 				get.GetMutableColumnIds() = std::move(column_ids);
 				D_ASSERT(get.projection_ids.empty());
@@ -314,6 +340,15 @@ private:
 					for (auto &entry : get.table_filters) {
 						remapped_filters.PushFilter(restore_original_table_filter_index.at(entry.GetIndex()),
 						                            entry.TakeFilter());
+					}
+					for (const auto &filter : get.table_filters.GetMultiColumnFilters()) {
+						auto remapped_filter =
+						    ExpressionFilter::GetExpressionFilter(*filter, "CommonSubplanOptimizer::ConvertTableIndex")
+						        .Copy();
+						for (auto &column_index : remapped_filter->column_indexes) {
+							column_index = restore_original_table_filter_index.at(column_index);
+						}
+						remapped_filters.PushMultiColumnFilter(std::move(remapped_filter));
 					}
 					get.table_filters = std::move(remapped_filters);
 				}
@@ -449,6 +484,7 @@ private:
 	vector<vector<ProjectionIndex>> projection_maps;
 
 	//! Utility to temporarily store column ids, projection_ids, table indices, expression info and children
+	OrdinalityType source_ordinality = OrdinalityType::WITHOUT_ORDINALITY;
 	vector<ColumnIndex> column_ids;
 	vector<column_t> chunk_column_ids;
 	vector<ProjectionIndex> projection_ids;
@@ -568,7 +604,6 @@ private:
 		case LogicalOperatorType::LOGICAL_TOP_N:
 		case LogicalOperatorType::LOGICAL_DISTINCT:
 		case LogicalOperatorType::LOGICAL_PIVOT:
-		case LogicalOperatorType::LOGICAL_GET:
 		case LogicalOperatorType::LOGICAL_EXPRESSION_GET:
 		case LogicalOperatorType::LOGICAL_DUMMY_SCAN:
 		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
@@ -580,6 +615,18 @@ private:
 		case LogicalOperatorType::LOGICAL_EXCEPT:
 		case LogicalOperatorType::LOGICAL_INTERSECT:
 			return true;
+		case LogicalOperatorType::LOGICAL_GET: {
+			auto &get = op.Cast<LogicalGet>();
+			if (get.bind_data && !get.function.HasSerializationCallbacks() && get.parameters.empty()) {
+				// Without serialization callbacks, the serialized form carries only the call parameters
+				// (see LogicalGet::Serialize). A scan without positional parameters - e.g., one created through
+				// an attached catalog - keeps its identity solely in the bind data, and its options do not
+				// identify what it reads, so equal serialized bytes cannot prove that two scans read the same
+				// table.
+				return false;
+			}
+			return true;
+		}
 		case LogicalOperatorType::LOGICAL_CHUNK_GET:
 			// Avoid serializing massive amounts of data (this is here because of the "Test TPCH arrow roundtrip" test)
 			return op.Cast<LogicalColumnDataGet>().collection->Count() < 1000;
@@ -975,8 +1022,12 @@ public:
 				D_ASSERT(subplan.canonical_bindings.size() == new_bindings.size());
 				for (idx_t i = 0; i < old_bindings[subplan_idx].size(); i++) {
 					replacer.replacement_bindings.emplace_back(old_bindings[subplan_idx][i], new_bindings[i]);
+#ifdef D_ASSERT_IS_ENABLED
 					const auto inserted = generated_binding_map.emplace(new_bindings[i], subplan.canonical_bindings[i]);
 					D_ASSERT(inserted.second);
+#else
+					generated_binding_map.emplace(new_bindings[i], subplan.canonical_bindings[i]);
+#endif
 				}
 			}
 

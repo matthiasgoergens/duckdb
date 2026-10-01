@@ -3,6 +3,7 @@
 #include "duckdb/catalog/catalog_entry/duck_schema_entry.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/parser/parsed_data/alter_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/catalog/default/default_schemas.hpp"
 #include "duckdb/function/built_in_functions.hpp"
@@ -80,17 +81,28 @@ optional_ptr<CatalogEntry> DuckCatalog::CreateSchemaInternal(CatalogTransaction 
 	optional_ptr<CatalogEntry> parent_entry = schemas->GetEntry(transaction, parents[0]);
 	if (!parent_entry) {
 		// the root component was not a catalog (otherwise it would have been resolved as one) nor an existing schema
-		throw CatalogException("\"%s\" is not a catalog or schema", parents[0].GetIdentifierName());
+		throw CatalogException("%s is not a catalog or schema", parents[0]);
 	}
 	for (idx_t i = 1; i < parents.size(); i++) {
 		auto &duck_parent = parent_entry->Cast<DuckSchemaEntry>();
 		parent_entry = duck_parent.GetCatalogSet(CatalogType::SCHEMA_ENTRY).GetEntry(transaction, parents[i]);
 		if (!parent_entry) {
-			throw CatalogException("Cannot create nested schema \"%s\": parent schema \"%s\" does not exist",
-			                       info.SchemaName().GetIdentifierName(), parents[i].GetIdentifierName());
+			throw CatalogException("Cannot create nested schema %s: parent schema %s does not exist", info.SchemaName(),
+			                       parents[i]);
 		}
 	}
 	return parent_entry->Cast<DuckSchemaEntry>().CreateSchema(transaction, info);
+}
+
+void DuckCatalog::AlterSchema(CatalogTransaction transaction, SchemaCatalogEntry &schema, AlterSchemaInfo &info) {
+	switch (info.alter_schema_type) {
+	case AlterSchemaType::SET_SCHEMA_OPTIONS:
+		throw NotImplementedException("SET (<options>) is not supported for DuckDB schemas");
+	case AlterSchemaType::RESET_SCHEMA_OPTIONS:
+		throw NotImplementedException("RESET (<options>) is not supported for DuckDB schemas");
+	default:
+		throw InternalException("Unrecognized alter schema type!");
+	}
 }
 
 optional_ptr<CatalogEntry> DuckCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
@@ -139,8 +151,7 @@ void DuckCatalog::DropSchema(CatalogTransaction transaction, DropInfo &info) {
 		auto parent_entry = target_set.get().GetEntry(transaction, path[i]);
 		if (!parent_entry) {
 			if (info.if_not_found == OnEntryNotFound::THROW_EXCEPTION) {
-				throw CatalogException("Cannot drop schema \"%s\": parent schema \"%s\" does not exist",
-				                       schema_name.GetIdentifierName(), path[i].GetIdentifierName());
+				throw CatalogException("Cannot drop schema %s: parent schema %s does not exist", schema_name, path[i]);
 			}
 			return;
 		}
